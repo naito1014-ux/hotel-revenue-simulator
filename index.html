@@ -57,7 +57,7 @@ function generateDays(year){
   return days;
 }
 
-const RANK_COLORS=["#1e293b","#94a3b8","#3b82f6","#22c55e","#f59e0b","#dc2626","#e11d48","#9333ea","#06b6d4","#84cc16","#f97316"];
+const RANK_COLORS=["#1e293b","#94a3b8","#3b82f6","#22c55e","#f59e0b","#dc2626","#9333ea","#06b6d4","#ec4899","#84cc16","#f97316"];
 const fmt=n=>n.toLocaleString("ja-JP");
 const fmtYen=n=>"¥"+fmt(Math.round(n));
 
@@ -236,7 +236,7 @@ function MasterSettings({roomTypes,setRoomTypes,totalArea,setTotalArea,demandLev
         <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
           {demandLevels.map(dl=>(
             <div key={dl.level} style={{display:"flex",alignItems:"center",gap:4,background:"#0f172a",borderRadius:6,padding:"4px 8px"}}>
-              <div style={{width:12,height:12,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#e11d48"}}/>
+              <div style={{width:12,height:12,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#9333ea"}}/>
               <span style={{fontSize:12,color:"#94a3b8",minWidth:16,textAlign:"center"}}>{dl.level}</span>
               <input value={dl.label} onChange={e=>updateLevelLabel(dl.level,e.target.value)} style={{...IS,width:70,fontSize:11,textAlign:"left"}}/>
             </div>
@@ -272,7 +272,7 @@ function MasterSettings({roomTypes,setRoomTypes,totalArea,setTotalArea,demandLev
                 <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:400}}>需要ランク</th>
                 {activeLevels.map(dl=>(
                   <th key={dl.level} style={{padding:"6px 8px",textAlign:"center"}}>
-                    <span style={{display:"inline-block",width:10,height:10,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#e11d48",marginRight:4}}/>
+                    <span style={{display:"inline-block",width:10,height:10,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#9333ea",marginRight:4}}/>
                     {dl.level}({dl.label})
                   </th>
                 ))}
@@ -347,9 +347,37 @@ function DemandCalendar({days,roomTypes,demandMap,setDemand,setMonthDemand,copyC
 
       <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
         {demandLevels.map(dl=>(<div key={dl.level} style={{display:"flex",alignItems:"center",gap:3}}>
-          <div style={{width:12,height:12,borderRadius:3,background:RANK_COLORS[dl.level]||"#e11d48"}}/><span style={{fontSize:10,color:"#94a3b8"}}>{dl.level}:{dl.label}</span>
+          <div style={{width:12,height:12,borderRadius:3,background:RANK_COLORS[dl.level]||"#9333ea"}}/><span style={{fontSize:10,color:"#94a3b8"}}>{dl.level}:{dl.label}</span>
         </div>))}
       </div>
+
+      {/* Master reference table */}
+      {(()=>{const rt=roomTypes.find(r=>r.id===selectedRT);if(!rt)return null;
+        const activeLevels=demandLevels.filter(d=>d.level>0).sort((a,b)=>b.level-a.level);
+        return(
+        <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:8,padding:10,marginBottom:12,overflowX:"auto"}}>
+          <span style={{fontSize:12,color:"#94a3b8",fontWeight:600}}>📋 {rt.name} のマスター設定参照</span>
+          <table style={{borderCollapse:"collapse",width:"100%",fontSize:11,marginTop:6}}>
+            <thead><tr style={{borderBottom:"1px solid #334155"}}>
+              <th style={{padding:"4px 8px",textAlign:"left",color:"#64748b",fontWeight:400}}>ランク</th>
+              {activeLevels.map(dl=>(
+                <th key={dl.level} style={{padding:"4px 8px",textAlign:"center"}}>
+                  <div style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#9333ea",marginRight:3,verticalAlign:"middle"}}/>
+                  <span style={{color:"#e2e8f0"}}>{dl.level}({dl.label})</span>
+                </th>
+              ))}
+            </tr></thead>
+            <tbody>
+              <tr><td style={{padding:"3px 8px",color:"#94a3b8"}}>単価</td>
+                {activeLevels.map(dl=><td key={dl.level} style={{padding:"3px 8px",textAlign:"center",color:"#a78bfa",fontWeight:600}}>{fmtYen(rt.prices[dl.level]||0)}</td>)}
+              </tr>
+              <tr><td style={{padding:"3px 8px",color:"#94a3b8"}}>稼働率</td>
+                {activeLevels.map(dl=><td key={dl.level} style={{padding:"3px 8px",textAlign:"center",color:"#fbbf24",fontWeight:600}}>{rt.occ[dl.level]||0}%</td>)}
+              </tr>
+            </tbody>
+          </table>
+        </div>);
+      })()}
 
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10}}>
         {months.map(month=>{
@@ -364,7 +392,7 @@ function DemandCalendar({days,roomTypes,demandMap,setDemand,setMonthDemand,copyC
                 return(<div key={day.index}
                   onClick={()=>{if(paintMode)setDemand(day.index,selectedRT,paintVal);else setDemand(day.index,selectedRT,demand===0?maxLevel:demand-1)}}
                   onMouseEnter={e=>{if(paintMode&&e.buttons===1)setDemand(day.index,selectedRT,paintVal)}}
-                  style={{background:RANK_COLORS[demand]||"#e11d48",color:demand===0?"#475569":"#fff",textAlign:"center",padding:"3px 0",borderRadius:3,cursor:"pointer",
+                  style={{background:RANK_COLORS[demand]||"#9333ea",color:demand===0?"#475569":"#fff",textAlign:"center",padding:"3px 0",borderRadius:3,cursor:"pointer",
                     fontWeight:day.isHoliday||day.isSun||day.isSat?700:400,opacity:demand===0?.5:1,
                     border:day.isHoliday?"1px solid #fbbf24":"1px solid transparent",userSelect:"none"}}
                   title={day.label+"("+day.dowLabel+") 需要:"+demand+(day.isHoliday?" 祝日":"")}>{day.day}</div>);
