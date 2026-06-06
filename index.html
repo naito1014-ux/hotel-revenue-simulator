@@ -189,7 +189,7 @@ function App(){
         {tab===0&&<MasterSettings roomTypes={roomTypes} setRoomTypes={setRoomTypes} totalArea={totalArea} setTotalArea={setTotalArea} demandLevels={demandLevels} setDemandLevels={setDemandLevels}/>}
         {tab===1&&<DemandCalendar days={days} roomTypes={roomTypes} demandMap={demandMap} setDemand={setDemand} setMonthDemand={setMonthDemand} copyCalendar={copyCalendar} demandLevels={demandLevels}/>}
         {tab===2&&<RevenueSimulation days={days} roomTypes={roomTypes} dailyRevenue={dailyRevenue} monthlyRevenue={monthlyRevenue} annualRevenue={annualRevenue} demandLevels={demandLevels}/>}
-        {tab===3&&<PlanOptimizer roomTypes={roomTypes} days={days} demandMap={demandMap} plans={plans} setPlans={setPlans} demandLevels={demandLevels}/>}
+        {tab===3&&<PlanOptimizer roomTypes={roomTypes} days={days} demandMap={demandMap} plans={plans} setPlans={setPlans} demandLevels={demandLevels} scenarios={scenarios}/>}
         {tab===4&&<ScenarioCompare scenarios={scenarios} setScenarios={setScenarios} saveScenario={saveScenario} loadScenario={loadScenario} calcDailyRevenue={calcDailyRevenue} days={days} annualRevenue={annualRevenue} roomTypes={roomTypes}/>}
       </div>
     </div>
@@ -516,7 +516,7 @@ function RevenueSimulation({days,roomTypes,dailyRevenue,monthlyRevenue,annualRev
 }
 
 // ═══ PLAN-BASED OPTIMIZER ═══
-function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
+function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels,scenarios}){
   const[results,setResults]=useState([]);
   const[running,setRunning]=useState(false);
   const[showTop,setShowTop]=useState(20);
@@ -525,19 +525,36 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
     const ts=Date.now();
     setPlans(p=>[...p,{
       id:"plan_"+ts,name:"新規プラン",roomsPerFloor:10,floors:8,
-      types:[{id:"t1_"+ts,name:"シングル",area:14.47},{id:"t2_"+ts,name:"ツイン",area:31.36}]
+      types:[{id:"t1_"+ts,name:"シングル",area:14.47},{id:"t2_"+ts,name:"ツイン",area:31.36}],
+      scenarioNames:[],useDemandFrom:null
     }]);
   };
 
-  // Presets
-  const loadPresets=()=>{
+  // Auto-generate plans from saved scenarios
+  const generateFromScenarios=()=>{
+    if(!scenarios||scenarios.length===0){alert("シナリオが保存されていません");return}
+    const groups={};
+    scenarios.forEach(sc=>{
+      const sig=sc.roomTypes.map(rt=>rt.name+":"+rt.area).sort().join("|");
+      if(!groups[sig])groups[sig]={scenarios:[],roomTypes:sc.roomTypes};
+      groups[sig].scenarios.push(sc);
+    });
     const ts=Date.now();
-    setPlans([
-      {id:"planA_"+ts,name:"Aプラン（通常）",roomsPerFloor:10,floors:8,
-        types:[{id:"tA1_"+ts,name:"シングル",area:14.47},{id:"tA2_"+ts,name:"ツイン",area:31.36}]},
-      {id:"planB_"+ts,name:"Bプラン（ロフト付き）",roomsPerFloor:10,floors:7,
-        types:[{id:"tB1_"+ts,name:"シングル",area:16.87},{id:"tB2_"+ts,name:"ツイン",area:33.75}]}
-    ]);
+    const newPlans=Object.entries(groups).map(([sig,group],idx)=>{
+      const areas=group.scenarios.map(sc=>sc.roomTypes.reduce((s,rt)=>s+rt.rooms*rt.area,0));
+      const maxArea=Math.max(...areas);
+      const scenarioNames=group.scenarios.map(sc=>sc.name);
+      return{
+        id:"auto_"+ts+"_"+idx,
+        name:scenarioNames.join(" / ")+" の最適化",
+        roomsPerFloor:10,floors:8,
+        types:group.roomTypes.map((rt,i)=>({id:"at_"+ts+"_"+idx+"_"+i,name:rt.name,area:rt.area})),
+        scenarioNames,
+        useDemandFrom:group.scenarios[0],
+        maxArea
+      };
+    });
+    setPlans(newPlans);
   };
 
   const updatePlan=(idx,f,v)=>setPlans(p=>p.map((pl,i)=>i===idx?{...pl,[f]:v}:pl));
@@ -552,8 +569,9 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
     setPlans(p=>p.map((pl,i)=>i===pIdx?{...pl,types:pl.types.filter((_,j)=>j!==tIdx)}:pl));
   };
 
-  const findMasterRT=(planTypeName)=>{
-    return roomTypes.find(rt=>planTypeName.includes(rt.name)||rt.name.includes(planTypeName))||roomTypes[0];
+  const findMasterRT=(planTypeName,srcRoomTypes)=>{
+    const rts=srcRoomTypes||roomTypes;
+    return rts.find(rt=>planTypeName.includes(rt.name)||rt.name.includes(planTypeName))||rts[0];
   };
 
   const runAllPlans=()=>{
@@ -562,7 +580,9 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
       const allResults=[];
       plans.forEach(plan=>{
         const smallestArea=Math.min(...plan.types.map(t=>t.area));
-        const totalFloorArea=plan.roomsPerFloor*smallestArea*plan.floors;
+        const totalFloorArea=plan.maxArea||plan.roomsPerFloor*smallestArea*plan.floors;
+        const srcDemandMap=plan.useDemandFrom?.demandMap||demandMap;
+        const srcRoomTypes=plan.useDemandFrom?.roomTypes||roomTypes;
         const combos=[];
         const types=plan.types;
 
@@ -583,19 +603,30 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
         }
         if(types.length>0)generate(0,totalFloorArea,[]);
 
+        // Find saved scenarios that belong to this plan
+        const matchScenarios=(scenarios||[]).filter(sc=>plan.scenarioNames?.includes(sc.name));
+
         const scored=combos.map(combo=>{
           let totalRev=0;
           days.forEach(day=>{
             combo.forEach(c=>{
-              const mrt=findMasterRT(c.name);if(!mrt)return;
-              const demand=demandMap[day.index]?.[mrt.id]??2;if(demand===0)return;
+              const mrt=findMasterRT(c.name,srcRoomTypes);if(!mrt)return;
+              const demand=srcDemandMap[day.index]?.[mrt.id]??2;if(demand===0)return;
               const price=mrt.prices[demand]||0;const occ=(mrt.occ[demand]||0)/100;
               totalRev+=Math.round(c.rooms*occ*10)/10*price;
             });
           });
           const totalRooms=combo.reduce((s,c)=>s+c.rooms,0);
           const usedArea=combo.reduce((s,c)=>s+c.rooms*c.area,0);
-          return{combo,revenue:totalRev,totalRooms,usedArea,planName:plan.name,planId:plan.id};
+          let matchedScenario=null;
+          matchScenarios.forEach(sc=>{
+            const matches=combo.every(c=>{
+              const scRT=sc.roomTypes.find(rt=>c.name.includes(rt.name)||rt.name.includes(c.name));
+              return scRT&&scRT.rooms===c.rooms;
+            });
+            if(matches)matchedScenario=sc.name;
+          });
+          return{combo,revenue:totalRev,totalRooms,usedArea,planName:plan.name,planId:plan.id,matchedScenario};
         });
 
         scored.sort((a,b)=>b.revenue-a.revenue);
@@ -619,49 +650,50 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
         <h3 style={{margin:"0 0 8px",fontSize:15,fontWeight:600,color:"#f8fafc"}}>🏗️ プラン別ルームミックス最適化</h3>
         <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:8,padding:12,marginBottom:12,fontSize:13,color:"#94a3b8",lineHeight:1.8}}>
           <strong style={{color:"#f8fafc"}}>使い方:</strong><br/>
-          ① プランを作成（例：「Aプラン 10室×8階」）し、部屋タイプと面積を入力<br/>
-          ② 「最適化を実行」すると、<strong style={{color:"#22c55e"}}>全ての室数パターンを自動で全探索</strong>し、売上最大の構成を算出します<br/>
-          ③ 例: シングル64室/ツイン8室 〜 シングル0室/ツイン36室 まで全パターン計算 → <strong style={{color:"#fbbf24"}}>「シングル56室/ツイン12室が最適」</strong>のように解を提示<br/>
-          ※ 単価・稼働率はマスター設定から部屋タイプ名でマッチングします
+          ① 「シナリオ比較」タブで複数パターンを保存（例：A1, A2, B1, B2）<br/>
+          ② <strong style={{color:"#22c55e"}}>「📋 保存シナリオから自動生成」</strong>を押すと、同じ部屋タイプのシナリオをグループ化してプランを自動作成<br/>
+          ③ 「最適化を実行」で全パターン自動探索 → 保存シナリオ間の最適構成を👑で表示。保存済みパターンには📌マーク
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <button onClick={addPlan} style={{background:"#22c55e",color:"#0f172a",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>＋ プラン追加</button>
-          <button onClick={loadPresets} style={{background:"#3b82f6",color:"#fff",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>📋 サンプルプリセット（A/B 2プラン）</button>
+          <button onClick={generateFromScenarios} disabled={!scenarios||scenarios.length===0}
+            style={{background:scenarios?.length>0?"#22c55e":"#334155",color:scenarios?.length>0?"#0f172a":"#64748b",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:700,cursor:scenarios?.length>0?"pointer":"default"}}>
+            📋 保存シナリオから自動生成（{scenarios?.length||0}件）
+          </button>
+          <button onClick={addPlan} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,cursor:"pointer"}}>＋ 手動でプラン追加</button>
         </div>
       </div>
 
       {plans.map((plan,pIdx)=>{
         const smallestArea=Math.min(...plan.types.map(t=>t.area));
-        const totalArea=plan.roomsPerFloor*smallestArea*plan.floors;
+        const totalArea=plan.maxArea||plan.roomsPerFloor*smallestArea*plan.floors;
         return(
         <div key={plan.id} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:12}}>
           <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
-            <input value={plan.name} onChange={e=>updatePlan(pIdx,"name",e.target.value)} style={{...IS,width:200,fontSize:15,fontWeight:700}}/>
-            <div><span style={{fontSize:11,color:"#94a3b8",display:"block"}}>室/フロア</span><input type="number" value={plan.roomsPerFloor} onChange={e=>updatePlan(pIdx,"roomsPerFloor",+e.target.value)} style={IS}/></div>
-            <div><span style={{fontSize:11,color:"#94a3b8",display:"block"}}>階数</span><input type="number" value={plan.floors} onChange={e=>updatePlan(pIdx,"floors",+e.target.value)} style={IS}/></div>
+            <input value={plan.name} onChange={e=>updatePlan(pIdx,"name",e.target.value)} style={{...IS,width:280,fontSize:15,fontWeight:700}}/>
             <div style={{background:"#0f172a",borderRadius:6,padding:"6px 12px",border:"1px solid #334155"}}>
-              <div style={{fontSize:10,color:"#64748b"}}>総面積上限</div>
+              <div style={{fontSize:10,color:"#64748b"}}>探索面積上限</div>
               <div style={{fontSize:14,fontWeight:700,color:"#38bdf8"}}>{totalArea.toFixed(1)}㎡</div>
             </div>
-            <div style={{background:"#0f172a",borderRadius:6,padding:"6px 12px",border:"1px solid #334155"}}>
-              <div style={{fontSize:10,color:"#64748b"}}>最大室数(全てシングルの場合)</div>
-              <div style={{fontSize:14,fontWeight:700,color:"#e2e8f0"}}>{plan.roomsPerFloor*plan.floors}室</div>
-            </div>
-            <button onClick={()=>removePlan(pIdx)} style={{marginLeft:"auto",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"4px 10px",fontSize:12,cursor:"pointer"}}>プラン削除</button>
+            {plan.scenarioNames?.length>0&&(
+              <div style={{background:"#14532d",borderRadius:6,padding:"6px 12px",border:"1px solid #166534"}}>
+                <div style={{fontSize:10,color:"#86efac"}}>元シナリオ</div>
+                <div style={{fontSize:11,color:"#f0fdf4"}}>{plan.scenarioNames.join(", ")}</div>
+              </div>
+            )}
+            <button onClick={()=>removePlan(pIdx)} style={{marginLeft:"auto",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"4px 10px",fontSize:12,cursor:"pointer"}}>削除</button>
           </div>
           <div style={{marginBottom:12}}>
             <span style={{fontSize:13,color:"#94a3b8",fontWeight:600}}>部屋タイプ:</span>
             {plan.types.map((t,tIdx)=>{
-              const matched=findMasterRT(t.name);
+              const srcRTs=plan.useDemandFrom?.roomTypes||roomTypes;
+              const matched=findMasterRT(t.name,srcRTs);
               return(
               <div key={t.id} style={{display:"flex",gap:8,alignItems:"center",marginTop:6,flexWrap:"wrap"}}>
                 <input value={t.name} onChange={e=>updatePlanType(pIdx,tIdx,"name",e.target.value)} style={{...IS,width:160,fontWeight:600}}/>
                 <span style={{fontSize:11,color:"#94a3b8"}}>面積:</span>
                 <input type="number" step="0.01" value={t.area} onChange={e=>updatePlanType(pIdx,tIdx,"area",+e.target.value)} style={{...IS,width:80}}/>
                 <span style={{fontSize:11,color:"#94a3b8"}}>㎡</span>
-                <span style={{fontSize:11,padding:"2px 8px",borderRadius:4,background:matched?"#14532d":"#7f1d1d",color:matched?"#86efac":"#fca5a5"}}>
-                  → マスター「{matched?.name||"未マッチ"}」の単価・稼働率
-                </span>
+                <span style={{fontSize:11,padding:"2px 8px",borderRadius:4,background:matched?"#14532d":"#7f1d1d",color:matched?"#86efac":"#fca5a5"}}>→「{matched?.name||"未マッチ"}」の単価・稼働率</span>
                 {plan.types.length>1&&<button onClick={()=>removePlanType(pIdx,tIdx)} style={{background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>✕</button>}
               </div>);
             })}
@@ -675,8 +707,7 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
           <button onClick={runAllPlans} disabled={running} style={{background:running?"#475569":"#22c55e",color:running?"#94a3b8":"#0f172a",border:"none",borderRadius:6,padding:"10px 24px",fontSize:14,fontWeight:700,cursor:running?"wait":"pointer"}}>
             {running?"全パターン探索中...":"🔍 最適化を実行（全パターン自動探索）"}
           </button>
-          <span style={{fontSize:12,color:"#64748b"}}>
-            表示件数:
+          <span style={{fontSize:12,color:"#64748b"}}>表示:
             <select value={showTop} onChange={e=>setShowTop(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:4,padding:"2px 6px",fontSize:12,marginLeft:4}}>
               {[10,20,50,100].map(n=><option key={n} value={n}>TOP{n}</option>)}
             </select>
@@ -687,9 +718,7 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
       {bestOverall&&(
         <div style={{background:"linear-gradient(135deg,#052e16,#14532d)",border:"2px solid #22c55e",borderRadius:10,padding:16,marginBottom:16}}>
           <h3 style={{margin:"0 0 8px",fontSize:16,fontWeight:700,color:"#fbbf24"}}>👑 全プラン横断 最適解</h3>
-          <div style={{fontSize:15,color:"#f0fdf4"}}>
-            <strong>{bestOverall.planName}</strong> — {bestOverall.combo.map(c=>c.name+": "+c.rooms+"室").join(" / ")}
-          </div>
+          <div style={{fontSize:15,color:"#f0fdf4"}}><strong>{bestOverall.planName}</strong> — {bestOverall.combo.map(c=>c.name+": "+c.rooms+"室").join(" / ")}</div>
           <div style={{fontSize:22,fontWeight:800,color:"#22c55e",marginTop:4}}>年間売上: {fmtYen(bestOverall.revenue)}</div>
           <div style={{fontSize:12,color:"#86efac"}}>総室数: {bestOverall.totalRooms}室 / 使用面積: {bestOverall.usedArea.toFixed(1)}㎡</div>
         </div>
@@ -725,18 +754,21 @@ function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels}){
                 <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>使用面積</th>
                 <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>年間売上</th>
                 {best&&<th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>最適比</th>}
+                <th style={{padding:"8px",textAlign:"center",color:"#94a3b8"}}>メモ</th>
               </tr></thead>
               <tbody>
                 {top.map((sc,i)=>{
                   const diffPct=best?((sc.revenue-best.revenue)/best.revenue*100):0;
+                  const isScenario=!!sc.matchedScenario;
                   return(
-                  <tr key={i} style={{borderBottom:"1px solid #1e293b",background:i===0?"#052e16":"transparent"}}>
+                  <tr key={i} style={{borderBottom:"1px solid #1e293b",background:i===0?"#052e16":isScenario?"#1a1a2e":"transparent"}}>
                     <td style={{padding:"6px 8px",textAlign:"center",color:i===0?"#fbbf24":"#f8fafc",fontWeight:i===0?800:400}}>{i===0?"👑":i+1}</td>
-                    {r.plan.types.map(t=>{const c=sc.combo.find(c=>c.id===t.id);return<td key={t.id} style={{padding:"6px 8px",textAlign:"center",color:"#e2e8f0",fontWeight:i===0?700:400}}>{c?.rooms||0}室</td>})}
+                    {r.plan.types.map(t=>{const c=sc.combo.find(c=>c.id===t.id);return<td key={t.id} style={{padding:"6px 8px",textAlign:"center",color:"#e2e8f0",fontWeight:i===0||isScenario?700:400}}>{c?.rooms||0}室</td>})}
                     <td style={{padding:"6px 8px",textAlign:"right",color:"#e2e8f0"}}>{sc.totalRooms}室</td>
                     <td style={{padding:"6px 8px",textAlign:"right",color:"#94a3b8"}}>{sc.usedArea.toFixed(1)}㎡</td>
                     <td style={{padding:"6px 8px",textAlign:"right",color:"#22c55e",fontWeight:700}}>{fmtYen(sc.revenue)}</td>
                     {best&&<td style={{padding:"6px 8px",textAlign:"right",color:diffPct===0?"#22c55e":"#f87171",fontSize:11}}>{diffPct===0?"—":diffPct.toFixed(1)+"%"}</td>}
+                    <td style={{padding:"6px 8px",textAlign:"center",fontSize:11,color:isScenario?"#a78bfa":"#475569"}}>{isScenario?"📌 "+sc.matchedScenario:""}</td>
                   </tr>);
                 })}
               </tbody>
@@ -755,6 +787,7 @@ function ScenarioCompare({scenarios,setScenarios,saveScenario,loadScenario,calcD
 
   const doSave=()=>{if(newName.trim()){saveScenario(newName.trim());setNewName("")}};
   const deleteScenario=(idx)=>setScenarios(p=>p.filter((_,i)=>i!==idx));
+  const renameScenario=(idx,newName)=>setScenarios(p=>p.map((sc,i)=>i===idx?{...sc,name:newName}:sc));
 
   // Recalculate revenue for each scenario
   const enriched=scenarios.map(sc=>{
@@ -830,7 +863,7 @@ function ScenarioCompare({scenarios,setScenarios,saveScenario,loadScenario,calcD
                   const isBest=sc.revenue===best.revenue;
                   return(
                     <tr key={i} style={{borderBottom:"1px solid #1e293b",background:isBest?"#052e16":"transparent"}}>
-                      <td style={{padding:"6px 8px",color:isBest?"#fbbf24":"#f8fafc",fontWeight:isBest?700:400}}>{isBest?"👑 ":""}{sc.name}</td>
+                      <td style={{padding:"6px 8px",color:isBest?"#fbbf24":"#f8fafc",fontWeight:isBest?700:400}}>{isBest?"👑 ":""}<input value={sc.name} onChange={e=>renameScenario(i,e.target.value)} style={{background:"transparent",border:"1px solid transparent",borderRadius:4,color:"inherit",fontWeight:"inherit",fontSize:12,width:120,padding:"2px 4px"}} onFocus={e=>{e.target.style.borderColor="#475569";e.target.style.background="#0f172a"}} onBlur={e=>{e.target.style.borderColor="transparent";e.target.style.background="transparent"}}/></td>
                       <td style={{padding:"6px 8px",textAlign:"right",color:"#22c55e",fontWeight:700}}>{fmtYen(sc.revenue)}</td>
                       <td style={{padding:"6px 8px",textAlign:"right",color:"#fbbf24"}}>{sc.occ.toFixed(1)}%</td>
                       <td style={{padding:"6px 8px",textAlign:"right",color:"#a78bfa"}}>{fmtYen(sc.adr)}</td>
