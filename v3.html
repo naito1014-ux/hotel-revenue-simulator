@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ホテル収益シミュレーター v3.0（日別積み上げ）</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏨</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Noto Sans JP','Hiragino Sans',sans-serif;background:#0f172a;color:#e2e8f0}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-track{background:#1e293b}
+  ::-webkit-scrollbar-thumb{background:#475569;border-radius:4px}
+  ::-webkit-scrollbar-thumb:hover{background:#64748b}
+  input[type="number"]{-moz-appearance:textfield}
+  input[type="number"]::-webkit-inner-spin-button,input[type="number"]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+  select,input,button{font-family:inherit}
+  .tooltip{position:relative}.tooltip:hover::after{content:attr(data-tip);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:#334155;color:#f8fafc;padding:4px 8px;border-radius:4px;font-size:11px;white-space:nowrap;z-index:99}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useMemo,useCallback,useEffect,Fragment}=React;
+
+const isLeapYear=y=>(y%4===0&&y%100!==0)||y%400===0;
+const daysInYear=y=>isLeapYear(y)?366:365;
+
+function getJapaneseHolidays(year){
+  const h=new Set();const a=(m,d)=>h.add(year+"-"+String(m).padStart(2,"0")+"-"+String(d).padStart(2,"0"));
+  a(1,1);{let d=new Date(year,0,1);while(d.getDay()!==1)d.setDate(d.getDate()+1);d.setDate(d.getDate()+7);a(1,d.getDate())}
+  a(2,11);a(2,23);a(3,year<=2099?Math.floor(20.8431+.242194*(year-1980)-Math.floor((year-1980)/4)):21);
+  a(4,29);a(5,3);a(5,4);a(5,5);
+  {let d=new Date(year,6,1);while(d.getDay()!==1)d.setDate(d.getDate()+1);d.setDate(d.getDate()+14);a(7,d.getDate())}
+  a(8,11);{let d=new Date(year,8,1);while(d.getDay()!==1)d.setDate(d.getDate()+1);d.setDate(d.getDate()+14);a(9,d.getDate())}
+  a(9,year<=2099?Math.floor(23.2488+.242194*(year-1980)-Math.floor((year-1980)/4)):23);
+  {let d=new Date(year,9,1);while(d.getDay()!==1)d.setDate(d.getDate()+1);d.setDate(d.getDate()+7);a(10,d.getDate())}
+  a(11,3);a(11,23);
+  const list=[...h].sort();for(const x of list){const dt=new Date(x+"T00:00:00");if(dt.getDay()===0){let n=new Date(dt);n.setDate(n.getDate()+1);h.add(n.getFullYear()+"-"+String(n.getMonth()+1).padStart(2,"0")+"-"+String(n.getDate()).padStart(2,"0"))}}
+  return h;
+}
+
+function generateDays(year){
+  const holidays=getJapaneseHolidays(year);const days=[];
+  for(let i=0;i<daysInYear(year);i++){
+    const dt=new Date(year,0,1+i);const m=dt.getMonth()+1,d=dt.getDate(),dow=dt.getDay();
+    const key=year+"-"+String(m).padStart(2,"0")+"-"+String(d).padStart(2,"0");
+    const isHoliday=holidays.has(key),isSat=dow===6,isSun=dow===0;
+    const ndt=new Date(dt);ndt.setDate(ndt.getDate()+1);const nk=ndt.getFullYear()+"-"+String(ndt.getMonth()+1).padStart(2,"0")+"-"+String(ndt.getDate()).padStart(2,"0");
+    const isBeforeHoliday=dow===5||dow===6||holidays.has(nk);
+    days.push({index:i,date:dt,month:m,day:d,dow,key,isHoliday,isSat,isSun,isBeforeHoliday,label:m+"/"+d,dowLabel:["日","月","火","水","木","金","土"][dow]});
+  }
+  return days;
+}
+
+const RANK_COLORS=["#1e293b","#94a3b8","#3b82f6","#22c55e","#f59e0b","#dc2626","#9333ea","#06b6d4","#ec4899","#84cc16","#f97316"];
+const fmt=n=>n.toLocaleString("ja-JP");
+const fmtYen=n=>"¥"+fmt(Math.round(n));
+
+const TABS=["マスター設定","需要カレンダー","売上シミュレーション","プラン別最適化","シナリオ比較"];
+
+function initDemand(year,roomTypes,demandLevels){
+  const m={};const d=generateDays(year);
+  d.forEach(day=>{m[day.index]={};
+    roomTypes.forEach(rt=>{
+      let demand=Math.min(2,demandLevels.length-1);
+      if(day.isHoliday||day.isSun) demand=Math.min(4,demandLevels.length-1);
+      if(day.isSat||day.isBeforeHoliday) demand=Math.min(4,demandLevels.length-1);
+      if(day.dow>=1&&day.dow<=4&&!day.isHoliday) demand=Math.min(2,demandLevels.length-1);
+      if(day.dow===5&&!day.isHoliday) demand=Math.min(3,demandLevels.length-1);
+      if((day.month===4&&day.day>=28)||(day.month===5&&day.day<=5)) demand=Math.min(demandLevels.length-1,demandLevels.length-1);
+      if(day.month===8&&day.day>=10&&day.day<=16) demand=Math.min(demandLevels.length-1,demandLevels.length-1);
+      if(day.month===12&&day.day>=28||(day.month===1&&day.day<=3)) demand=Math.min(demandLevels.length-1,demandLevels.length-1);
+      m[day.index][rt.id]=demand;
+    });
+  });
+  return m;
+}
+
+function App(){
+  const[tab,setTab]=useState(0);
+  const[year,setYear]=useState(2027);
+  // Dynamic demand levels: array of {level, label}
+  const[demandLevels,setDemandLevels]=useState([
+    {level:0,label:"休館"},{level:1,label:"最低"},{level:2,label:"低"},{level:3,label:"中"},{level:4,label:"高"},{level:5,label:"最高"}
+  ]);
+  const[roomTypes,setRoomTypes]=useState([
+    {id:"single",name:"シングル",area:15,prices:{0:0,1:5000,2:6500,3:8000,4:10000,5:12000},occ:{0:0,1:30,2:50,3:70,4:85,5:95},rooms:20},
+    {id:"double",name:"ダブル",area:18,prices:{0:0,1:6000,2:8000,3:10000,4:13000,5:16000},occ:{0:0,1:35,2:55,3:75,4:90,5:98},rooms:30},
+    {id:"twin",name:"ツイン",area:28,prices:{0:0,1:8000,2:11000,3:14000,4:18000,5:22000},occ:{0:0,1:30,2:55,3:78,4:92,5:98},rooms:15},
+  ]);
+  const[totalArea,setTotalArea]=useState(2000);
+  // ── 価格弾力性モデル設定 ──
+  const[elasticity,setElasticity]=useState({on:false,occDil:0.55,adrEps:-0.35,base:{twin:40,double:80}});
+  const[demandMap,setDemandMap]=useState({});
+  const[scenarios,setScenarios]=useState([]);
+  const[plans,setPlans]=useState([]);
+
+  const days=useMemo(()=>generateDays(year),[year]);
+
+  useEffect(()=>{setDemandMap(initDemand(year,roomTypes,demandLevels))},[year]);
+
+  const setDemand=useCallback((di,ri,v)=>{setDemandMap(p=>({...p,[di]:{...(p[di]||{}),[ri]:v}}))},[]);
+  const setMonthDemand=useCallback((month,ri,v)=>{
+    setDemandMap(p=>{const n={...p};days.forEach(d=>{if(d.month===month){n[d.index]={...(n[d.index]||{}),[ri]:v}}});return n})
+  },[days]);
+  const copyCalendar=useCallback((fromId,toId)=>{
+    setDemandMap(p=>{const n={...p};Object.keys(n).forEach(k=>{if(n[k][fromId]!==undefined){n[k]={...n[k],[toId]:n[k][fromId]}}});return n})
+  },[]);
+
+  const calcDailyRevenue=useCallback((rts,dm)=>{
+    // 日別積み上げ：マスターのランク別ADR/OCCをそのまま使用（室数による補正なし）
+    return days.map(day=>{
+      let total=0,totalRoomsAll=0,soldRoomsAll=0;const details={};
+      rts.forEach(rt=>{
+        const demand=dm[day.index]?.[rt.id]??2;
+        if(demand===0){details[rt.id]={revenue:0,rooms:0,price:0,occ:0,totalRooms:rt.rooms};totalRoomsAll+=rt.rooms;return}
+        const price=rt.prices[demand]||0;const occ=(rt.occ[demand]||0)/100;
+        const soldRooms=Math.round(rt.rooms*occ*10)/10;const rev=soldRooms*price;
+        total+=rev;totalRoomsAll+=rt.rooms;soldRoomsAll+=soldRooms;
+        details[rt.id]={revenue:rev,rooms:soldRooms,price,occ:occ*100,totalRooms:rt.rooms};
+      });
+      const occAll=totalRoomsAll>0?(soldRoomsAll/totalRoomsAll)*100:0;
+      const adr=soldRoomsAll>0?total/soldRoomsAll:0;
+      return{total,details,occAll,adr,soldRoomsAll,totalRoomsAll};
+    });
+  },[days]);
+
+  const dailyRevenue=useMemo(()=>calcDailyRevenue(roomTypes,demandMap),[roomTypes,demandMap,calcDailyRevenue]);
+  const annualRevenue=useMemo(()=>dailyRevenue.reduce((s,d)=>s+d.total,0),[dailyRevenue]);
+  const monthlyRevenue=useMemo(()=>{const mr=Array(12).fill(0);days.forEach((d,i)=>{mr[d.month-1]+=dailyRevenue[i].total});return mr},[days,dailyRevenue]);
+
+  // Scenario management
+  const saveScenario=useCallback((name)=>{
+    const sc={name,timestamp:Date.now(),year,roomTypes:JSON.parse(JSON.stringify(roomTypes)),demandMap:JSON.parse(JSON.stringify(demandMap)),totalArea,demandLevels:JSON.parse(JSON.stringify(demandLevels)),annualRevenue};
+    setScenarios(p=>[...p,sc]);
+  },[year,roomTypes,demandMap,totalArea,demandLevels,annualRevenue]);
+
+  const loadScenario=useCallback((sc)=>{
+    setYear(sc.year);setRoomTypes(sc.roomTypes);setDemandMap(sc.demandMap);setTotalArea(sc.totalArea);
+    if(sc.demandLevels)setDemandLevels(sc.demandLevels);
+  },[]);
+
+  const exportAll=()=>{
+    const data={year,roomTypes,demandMap,totalArea,demandLevels,scenarios,plans};
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="hotel_sim_"+year+".json";a.click();URL.revokeObjectURL(url);
+  };
+  const importAll=(e)=>{
+    const file=e.target.files[0];if(!file)return;const r=new FileReader();
+    r.onload=(ev)=>{try{const d=JSON.parse(ev.target.result);
+      if(d.year)setYear(d.year);if(d.roomTypes)setRoomTypes(d.roomTypes);if(d.demandMap)setDemandMap(d.demandMap);
+      if(d.totalArea)setTotalArea(d.totalArea);if(d.demandLevels)setDemandLevels(d.demandLevels);
+      if(d.scenarios)setScenarios(d.scenarios);if(d.plans)setPlans(d.plans);alert("読み込み完了")}catch{alert("読み込み失敗")}};
+    r.readAsText(file);
+  };
+
+  return(
+    <div style={{fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif",background:"#0f172a",color:"#e2e8f0",minHeight:"100vh"}}>
+      <div style={{background:"linear-gradient(135deg,#1e293b,#0f172a)",borderBottom:"1px solid #334155",padding:"16px 24px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
+          <div><h1 style={{margin:0,fontSize:22,fontWeight:700,color:"#f8fafc"}}>🏨 ホテル収益シミュレーター v3.0</h1>
+          <p style={{margin:"4px 0 0",fontSize:12,color:"#94a3b8"}}>ニューアーバン日別データ積み上げ・タイプ別カレンダー・ルームミックス最適化</p></div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={exportAll} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:6,padding:"6px 14px",fontSize:12,cursor:"pointer"}}>💾 全データ保存</button>
+            <label style={{background:"#334155",color:"#e2e8f0",borderRadius:6,padding:"6px 14px",fontSize:12,cursor:"pointer",display:"inline-flex",alignItems:"center"}}>
+              📂 読込<input type="file" accept=".json" onChange={importAll} style={{display:"none"}}/>
+            </label>
+          </div>
+        </div>
+        <div style={{marginTop:10,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <label style={{fontSize:13,color:"#94a3b8"}}>対象年:</label>
+          <select value={year} onChange={e=>setYear(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:6,padding:"4px 8px",fontSize:14}}>
+            {[2025,2026,2027,2028,2029,2030,2031,2032,2033,2034,2035].map(y=><option key={y} value={y}>{y}年</option>)}
+          </select>
+          <div style={{marginLeft:"auto",background:"#1e293b",border:"1px solid #475569",borderRadius:8,padding:"8px 16px"}}>
+            <span style={{fontSize:12,color:"#94a3b8"}}>年間売上見込</span>
+            <span style={{fontSize:20,fontWeight:700,color:"#22c55e",marginLeft:12}}>{fmtYen(annualRevenue)}</span>
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",borderBottom:"1px solid #334155",background:"#1e293b",overflowX:"auto"}}>
+        {TABS.map((t,i)=>(
+          <button key={i} onClick={()=>setTab(i)} style={{padding:"12px 18px",fontSize:13,fontWeight:tab===i?700:400,color:tab===i?"#22c55e":"#94a3b8",background:"transparent",border:"none",borderBottom:tab===i?"2px solid #22c55e":"2px solid transparent",cursor:"pointer",whiteSpace:"nowrap"}}>{t}</button>
+        ))}
+      </div>
+      <div style={{padding:"20px 24px",maxWidth:1400,margin:"0 auto"}}>
+        {tab===0&&<MasterSettings roomTypes={roomTypes} setRoomTypes={setRoomTypes} totalArea={totalArea} setTotalArea={setTotalArea} demandLevels={demandLevels} setDemandLevels={setDemandLevels} elasticity={elasticity} setElasticity={setElasticity}/>}
+        {tab===1&&<DemandCalendar days={days} roomTypes={roomTypes} demandMap={demandMap} setDemand={setDemand} setMonthDemand={setMonthDemand} copyCalendar={copyCalendar} demandLevels={demandLevels}/>}
+        {tab===2&&<RevenueSimulation days={days} roomTypes={roomTypes} dailyRevenue={dailyRevenue} monthlyRevenue={monthlyRevenue} annualRevenue={annualRevenue} demandLevels={demandLevels}/>}
+        {tab===3&&<PlanOptimizer roomTypes={roomTypes} days={days} demandMap={demandMap} plans={plans} setPlans={setPlans} demandLevels={demandLevels} scenarios={scenarios} elasticity={elasticity}/>}
+        {tab===4&&<ScenarioCompare scenarios={scenarios} setScenarios={setScenarios} saveScenario={saveScenario} loadScenario={loadScenario} calcDailyRevenue={calcDailyRevenue} days={days} annualRevenue={annualRevenue} roomTypes={roomTypes}/>}
+      </div>
+    </div>
+  );
+}
+
+// ═══ MASTER SETTINGS ═══
+function MasterSettings({roomTypes,setRoomTypes,totalArea,setTotalArea,demandLevels,setDemandLevels,elasticity,setElasticity}){
+  const updateRT=(idx,f,v)=>setRoomTypes(p=>p.map((rt,i)=>i===idx?{...rt,[f]:v}:rt));
+  const updatePrice=(idx,lv,v)=>setRoomTypes(p=>p.map((rt,i)=>i===idx?{...rt,prices:{...rt.prices,[lv]:+v}}:rt));
+  const updateOcc=(idx,lv,v)=>setRoomTypes(p=>p.map((rt,i)=>i===idx?{...rt,occ:{...rt.occ,[lv]:+v}}:rt));
+  const addRT=()=>{
+    const id="type_"+Date.now();const pr={};const oc={};
+    demandLevels.forEach(dl=>{pr[dl.level]=dl.level===0?0:dl.level*2000+3000;oc[dl.level]=dl.level===0?0:Math.min(100,dl.level*15+10)});
+    setRoomTypes(p=>[...p,{id,name:"新規タイプ",area:20,prices:pr,occ:oc,rooms:10}]);
+  };
+  const removeRT=idx=>setRoomTypes(p=>p.filter((_,i)=>i!==idx));
+  const usedArea=roomTypes.reduce((s,rt)=>s+rt.area*rt.rooms,0);
+  const IS={background:"#0f172a",color:"#f8fafc",border:"1px solid #475569",borderRadius:4,padding:"4px 6px",fontSize:13,width:70,textAlign:"right"};
+  const LS={fontSize:11,color:"#94a3b8",display:"block",marginBottom:2};
+
+  // Add demand level
+  const addLevel=()=>{
+    const maxLv=Math.max(...demandLevels.map(d=>d.level));
+    const newLv=maxLv+1;
+    setDemandLevels(p=>[...p,{level:newLv,label:"ランク"+newLv}]);
+    // Add default prices/occ for new level to all room types
+    setRoomTypes(p=>p.map(rt=>({...rt,prices:{...rt.prices,[newLv]:Math.round((rt.prices[maxLv]||10000)*1.2)},occ:{...rt.occ,[newLv]:Math.min(100,(rt.occ[maxLv]||80)+5)}})));
+  };
+  const removeLevel=()=>{
+    if(demandLevels.length<=2)return;
+    const maxLv=Math.max(...demandLevels.map(d=>d.level));
+    setDemandLevels(p=>p.filter(d=>d.level!==maxLv));
+  };
+  const updateLevelLabel=(lv,label)=>setDemandLevels(p=>p.map(d=>d.level===lv?{...d,label}:d));
+
+  const activeLevels=demandLevels.filter(d=>d.level>0).sort((a,b)=>b.level-a.level);
+
+  return(
+    <div>
+      {/* ═══ ルームミックスの本質（ボラティリティ） ═══ */}
+      <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:16}}>
+        <h3 style={{margin:"0 0 8px",fontSize:15,fontWeight:600,color:"#f8fafc"}}>🎯 ルームミックスの本質：ボラティリティの違い</h3>
+        <p style={{margin:"0 0 10px",fontSize:12.5,color:"#94a3b8",lineHeight:1.8}}>
+          <b style={{color:"#4aa3c7"}}>ツイン</b>＝繁忙期は高単価で荒稼ぎ、閑散期は格崩れで激安（<b style={{color:"#f8fafc"}}>ハイリスク・ハイリターン</b>）。
+          <b style={{color:"#d98a4e"}}>ダブル</b>＝爆発力はないが年間通して底堅い（<b style={{color:"#f8fafc"}}>ローリスク・安定</b>）。<br/>
+          ツインを増やすほど繁忙期は強いが閑散期に足を引っ張られる。この繁閑バランスが最適ミックスを決めます。
+          ＝ニューアーバンの<b style={{color:"#f8fafc"}}>日別データをそのまま365日積み上げ</b>て算出（室数による補正なし）。
+        </p>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {roomTypes.filter(rt=>rt.id==='twin'||rt.id==='double'||rt.name.includes('ツイン')||rt.name.includes('ダブル')).map(rt=>{
+            const act=demandLevels.filter(d=>d.level>0).map(d=>d.level);
+            const prices=act.map(lv=>rt.prices[lv]||0).filter(p=>p>0);
+            const hi=Math.max(...prices),lo=Math.min(...prices);
+            const ratio=lo>0?(hi/lo):0;
+            return(<div key={rt.id} style={{background:"#0f172a",borderRadius:6,padding:"8px 12px",fontSize:11.5,color:"#cbd5e1"}}>
+              <b style={{color:rt.id==='twin'||rt.name.includes('ツイン')?"#4aa3c7":"#d98a4e"}}>{rt.name}</b>　
+              最高¥{hi.toLocaleString()} / 最低¥{lo.toLocaleString()}　
+              <span style={{color:"#fbbf24"}}>変動{ratio.toFixed(1)}倍</span>
+            </div>);
+          })}
+        </div>
+      </div>
+
+      {/* Demand Level Settings */}
+      <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:16}}>
+        <h3 style={{margin:"0 0 12px",fontSize:15,fontWeight:600,color:"#f8fafc"}}>📊 需要ランク設定（現在 {activeLevels.length} 段階）</h3>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+          {demandLevels.map(dl=>(
+            <div key={dl.level} style={{display:"flex",alignItems:"center",gap:4,background:"#0f172a",borderRadius:6,padding:"4px 8px"}}>
+              <div style={{width:12,height:12,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#9333ea"}}/>
+              <span style={{fontSize:12,color:"#94a3b8",minWidth:16,textAlign:"center"}}>{dl.level}</span>
+              <input value={dl.label} onChange={e=>updateLevelLabel(dl.level,e.target.value)} style={{...IS,width:70,fontSize:11,textAlign:"left"}}/>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={addLevel} style={{background:"#22c55e",color:"#0f172a",border:"none",borderRadius:6,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>＋ ランク追加</button>
+          <button onClick={removeLevel} style={{background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,padding:"6px 14px",fontSize:12,cursor:"pointer"}}>－ 最上位削除</button>
+        </div>
+      </div>
+
+      <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:20,flexWrap:"wrap"}}>
+        <div><span style={LS}>総客室面積 (㎡)</span><input type="number" value={totalArea} onChange={e=>setTotalArea(+e.target.value)} style={{...IS,width:100}}/></div>
+        <div style={{background:usedArea>totalArea?"#7f1d1d":"#14532d",padding:"8px 16px",borderRadius:8}}>
+          <span style={{fontSize:12,color:"#94a3b8"}}>使用面積</span>
+          <span style={{fontSize:16,fontWeight:700,color:usedArea>totalArea?"#fca5a5":"#86efac",marginLeft:8}}>{fmt(usedArea)}㎡ / {fmt(totalArea)}㎡</span>
+        </div>
+        <button onClick={addRT} style={{background:"#22c55e",color:"#0f172a",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>＋ 部屋タイプ追加</button>
+      </div>
+
+      {roomTypes.map((rt,idx)=>(
+        <div key={rt.id} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
+            <input value={rt.name} onChange={e=>updateRT(idx,"name",e.target.value)} style={{...IS,width:140,fontSize:15,fontWeight:700}}/>
+            <div><span style={LS}>面積(㎡)</span><input type="number" value={rt.area} onChange={e=>updateRT(idx,"area",+e.target.value)} style={IS}/></div>
+            <div><span style={LS}>室数</span><input type="number" value={rt.rooms} onChange={e=>updateRT(idx,"rooms",+e.target.value)} style={IS}/></div>
+            <span style={{fontSize:12,color:"#64748b"}}>小計:{fmt(rt.area*rt.rooms)}㎡</span>
+            {roomTypes.length>1&&<button onClick={()=>removeRT(idx)} style={{marginLeft:"auto",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"4px 10px",fontSize:12,cursor:"pointer"}}>削除</button>}
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:13}}>
+              <thead><tr style={{borderBottom:"1px solid #334155"}}>
+                <th style={{textAlign:"left",padding:"6px 8px",color:"#94a3b8",fontWeight:400}}>需要ランク</th>
+                {activeLevels.map(dl=>(
+                  <th key={dl.level} style={{padding:"6px 8px",textAlign:"center"}}>
+                    <span style={{display:"inline-block",width:10,height:10,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#9333ea",marginRight:4}}/>
+                    {dl.level}({dl.label})
+                  </th>
+                ))}
+              </tr></thead>
+              <tbody>
+                <tr><td style={{padding:"6px 8px",color:"#cbd5e1"}}>単価(円)</td>
+                  {activeLevels.map(dl=><td key={dl.level} style={{padding:"6px 8px",textAlign:"center"}}><input type="number" value={rt.prices[dl.level]||0} onChange={e=>updatePrice(idx,dl.level,e.target.value)} style={{...IS,width:80}}/></td>)}
+                </tr>
+                <tr><td style={{padding:"6px 8px",color:"#cbd5e1"}}>稼働率(%)</td>
+                  {activeLevels.map(dl=><td key={dl.level} style={{padding:"6px 8px",textAlign:"center"}}><input type="number" value={rt.occ[dl.level]||0} onChange={e=>updateOcc(idx,dl.level,e.target.value)} style={{...IS,width:60}} min={0} max={100}/></td>)}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ═══ DEMAND CALENDAR ═══
+function DemandCalendar({days,roomTypes,demandMap,setDemand,setMonthDemand,copyCalendar,demandLevels}){
+  const[selectedRT,setSelectedRT]=useState(roomTypes[0]?.id||"");
+  const[bulkMonth,setBulkMonth]=useState(1);
+  const[bulkVal,setBulkVal]=useState(3);
+  const[paintMode,setPaintMode]=useState(false);
+  const[paintVal,setPaintVal]=useState(3);
+  const[copyFrom,setCopyFrom]=useState("");
+  const months=Array.from({length:12},(_,i)=>i+1);
+  const maxLevel=Math.max(...demandLevels.map(d=>d.level));
+
+  const doCopy=()=>{if(copyFrom&&copyFrom!==selectedRT){copyCalendar(copyFrom,selectedRT);alert("コピー完了")}};
+
+  return(
+    <div>
+      <div style={{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+        <label style={{fontSize:13,color:"#94a3b8"}}>部屋タイプ:</label>
+        <select value={selectedRT} onChange={e=>setSelectedRT(e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:6,padding:"4px 8px",fontSize:13}}>
+          {roomTypes.map(rt=><option key={rt.id} value={rt.id}>{rt.name}</option>)}
+        </select>
+
+        {/* COPY feature */}
+        <div style={{display:"flex",gap:6,alignItems:"center",background:"#0f172a",borderRadius:8,padding:"4px 10px",border:"1px solid #334155"}}>
+          <span style={{fontSize:12,color:"#94a3b8"}}>📋 コピー元:</span>
+          <select value={copyFrom} onChange={e=>setCopyFrom(e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:4,padding:"2px 6px",fontSize:12}}>
+            <option value="">選択...</option>
+            {roomTypes.filter(rt=>rt.id!==selectedRT).map(rt=><option key={rt.id} value={rt.id}>{rt.name}</option>)}
+          </select>
+          <button onClick={doCopy} disabled={!copyFrom} style={{background:copyFrom?"#3b82f6":"#334155",color:"#fff",border:"none",borderRadius:4,padding:"3px 10px",fontSize:11,cursor:copyFrom?"pointer":"default",fontWeight:600}}>コピー</button>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <label style={{fontSize:12,color:"#94a3b8"}}>一括:</label>
+          <select value={bulkMonth} onChange={e=>setBulkMonth(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:6,padding:"3px 6px",fontSize:12}}>
+            {months.map(m=><option key={m} value={m}>{m}月</option>)}
+          </select>
+          <select value={bulkVal} onChange={e=>setBulkVal(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:6,padding:"3px 6px",fontSize:12}}>
+            {demandLevels.map(dl=><option key={dl.level} value={dl.level}>{dl.level}({dl.label})</option>)}
+          </select>
+          <button onClick={()=>setMonthDemand(bulkMonth,selectedRT,bulkVal)} style={{background:"#3b82f6",color:"#fff",border:"none",borderRadius:6,padding:"4px 12px",fontSize:12,cursor:"pointer",fontWeight:600}}>適用</button>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <label style={{fontSize:12,color:"#94a3b8"}}>ペイント:</label>
+          <button onClick={()=>setPaintMode(!paintMode)} style={{background:paintMode?"#22c55e":"#475569",color:"#fff",border:"none",borderRadius:6,padding:"3px 10px",fontSize:12,cursor:"pointer"}}>{paintMode?"ON":"OFF"}</button>
+          {paintMode&&<select value={paintVal} onChange={e=>setPaintVal(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:6,padding:"3px 6px",fontSize:12}}>
+            {demandLevels.map(dl=><option key={dl.level} value={dl.level}>{dl.level}</option>)}
+          </select>}
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+        {demandLevels.map(dl=>(<div key={dl.level} style={{display:"flex",alignItems:"center",gap:3}}>
+          <div style={{width:12,height:12,borderRadius:3,background:RANK_COLORS[dl.level]||"#9333ea"}}/><span style={{fontSize:10,color:"#94a3b8"}}>{dl.level}:{dl.label}</span>
+        </div>))}
+      </div>
+
+      {/* Master reference table */}
+      {(()=>{const rt=roomTypes.find(r=>r.id===selectedRT);if(!rt)return null;
+        const activeLevels=demandLevels.filter(d=>d.level>0).sort((a,b)=>b.level-a.level);
+        return(
+        <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:8,padding:10,marginBottom:12,overflowX:"auto"}}>
+          <span style={{fontSize:12,color:"#94a3b8",fontWeight:600}}>📋 {rt.name} のマスター設定参照</span>
+          <table style={{borderCollapse:"collapse",width:"100%",fontSize:11,marginTop:6}}>
+            <thead><tr style={{borderBottom:"1px solid #334155"}}>
+              <th style={{padding:"4px 8px",textAlign:"left",color:"#64748b",fontWeight:400}}>ランク</th>
+              {activeLevels.map(dl=>(
+                <th key={dl.level} style={{padding:"4px 8px",textAlign:"center"}}>
+                  <div style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:RANK_COLORS[dl.level]||"#9333ea",marginRight:3,verticalAlign:"middle"}}/>
+                  <span style={{color:"#e2e8f0"}}>{dl.level}({dl.label})</span>
+                </th>
+              ))}
+            </tr></thead>
+            <tbody>
+              <tr><td style={{padding:"3px 8px",color:"#94a3b8"}}>単価</td>
+                {activeLevels.map(dl=><td key={dl.level} style={{padding:"3px 8px",textAlign:"center",color:"#a78bfa",fontWeight:600}}>{fmtYen(rt.prices[dl.level]||0)}</td>)}
+              </tr>
+              <tr><td style={{padding:"3px 8px",color:"#94a3b8"}}>稼働率</td>
+                {activeLevels.map(dl=><td key={dl.level} style={{padding:"3px 8px",textAlign:"center",color:"#fbbf24",fontWeight:600}}>{rt.occ[dl.level]||0}%</td>)}
+              </tr>
+            </tbody>
+          </table>
+        </div>);
+      })()}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10}}>
+        {months.map(month=>{
+          const md=days.filter(d=>d.month===month);const fd=md[0]?.dow||0;
+          return(<div key={month} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:8,padding:10}}>
+            <h3 style={{margin:"0 0 6px",fontSize:13,fontWeight:600,color:"#f8fafc"}}>{month}月</h3>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,fontSize:10}}>
+              {["日","月","火","水","木","金","土"].map(d=><div key={d} style={{textAlign:"center",color:"#64748b",padding:1}}>{d}</div>)}
+              {Array.from({length:fd}).map((_,i)=><div key={"e"+i}/>)}
+              {md.map(day=>{
+                const demand=demandMap[day.index]?.[selectedRT]??2;
+                return(<div key={day.index}
+                  onClick={()=>{if(paintMode)setDemand(day.index,selectedRT,paintVal);else setDemand(day.index,selectedRT,demand===0?maxLevel:demand-1)}}
+                  onMouseEnter={e=>{if(paintMode&&e.buttons===1)setDemand(day.index,selectedRT,paintVal)}}
+                  style={{background:RANK_COLORS[demand]||"#9333ea",color:demand===0?"#475569":"#fff",textAlign:"center",padding:"3px 0",borderRadius:3,cursor:"pointer",
+                    fontWeight:day.isHoliday||day.isSun||day.isSat?700:400,opacity:demand===0?.5:1,
+                    border:day.isHoliday?"1px solid #fbbf24":"1px solid transparent",userSelect:"none"}}
+                  title={day.label+"("+day.dowLabel+") 需要:"+demand+(day.isHoliday?" 祝日":"")}>{day.day}</div>);
+              })}
+            </div>
+          </div>);
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ═══ REVENUE SIMULATION ═══
+function RevenueSimulation({days,roomTypes,dailyRevenue,monthlyRevenue,annualRevenue,demandLevels}){
+  const[viewMode,setViewMode]=useState("monthly");
+  const[selectedMonth,setSelectedMonth]=useState(1);
+  const maxMonthly=Math.max(...monthlyRevenue);
+  const rtRevenue=useMemo(()=>{const t={};roomTypes.forEach(rt=>{t[rt.id]=0});dailyRevenue.forEach(d=>{roomTypes.forEach(rt=>{t[rt.id]+=(d.details[rt.id]?.revenue||0)})});return t},[dailyRevenue,roomTypes]);
+  const avgOcc=useMemo(()=>{const s=dailyRevenue.reduce((a,d)=>a+d.soldRoomsAll,0),t=dailyRevenue.reduce((a,d)=>a+d.totalRoomsAll,0);return t>0?(s/t)*100:0},[dailyRevenue]);
+  const avgAdr=useMemo(()=>{const s=dailyRevenue.reduce((a,d)=>a+d.soldRoomsAll,0);return s>0?annualRevenue/s:0},[dailyRevenue,annualRevenue]);
+  const avgRevpar=useMemo(()=>{const t=dailyRevenue.reduce((a,d)=>a+d.totalRoomsAll,0);return t>0?annualRevenue/t:0},[dailyRevenue,annualRevenue]);
+
+  const exportCSV=()=>{
+    const h=["日付","曜日",...roomTypes.flatMap(rt=>[rt.name+"_売上",rt.name+"_OCC",rt.name+"_ADR"]),"合計","OCC","ADR","RevPAR"];
+    const rows=days.map((day,i)=>{const rev=dailyRevenue[i];const rp=rev.totalRoomsAll>0?rev.total/rev.totalRoomsAll:0;
+      return[day.label,day.dowLabel,...roomTypes.flatMap(rt=>{const d=rev.details[rt.id];return[Math.round(d?.revenue||0),(d?.occ||0).toFixed(1)+"%",Math.round(d?.price||0)]}),Math.round(rev.total),rev.occAll.toFixed(1)+"%",Math.round(rev.adr),Math.round(rp)].join(",")});
+    const csv="\uFEFF"+h.join(",")+"\n"+rows.join("\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="revenue_"+selectedMonth+"月.csv";a.click();URL.revokeObjectURL(url);
+  };
+
+  return(
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12,marginBottom:20}}>
+        <div style={{background:"linear-gradient(135deg,#14532d,#166534)",borderRadius:10,padding:16}}>
+          <div style={{fontSize:12,color:"#86efac"}}>年間売上見込</div>
+          <div style={{fontSize:24,fontWeight:800,color:"#f0fdf4",marginTop:4}}>{fmtYen(annualRevenue)}</div>
+        </div>
+        <div style={{background:"#1e293b",border:"1px solid #854d0e",borderRadius:10,padding:16}}>
+          <div style={{fontSize:12,color:"#fbbf24"}}>年間平均OCC</div><div style={{fontSize:22,fontWeight:800,color:"#fbbf24",marginTop:4}}>{avgOcc.toFixed(1)}%</div>
+        </div>
+        <div style={{background:"#1e293b",border:"1px solid #6d28d9",borderRadius:10,padding:16}}>
+          <div style={{fontSize:12,color:"#a78bfa"}}>年間平均ADR</div><div style={{fontSize:22,fontWeight:800,color:"#a78bfa",marginTop:4}}>{fmtYen(avgAdr)}</div>
+        </div>
+        <div style={{background:"#1e293b",border:"1px solid #0369a1",borderRadius:10,padding:16}}>
+          <div style={{fontSize:12,color:"#38bdf8"}}>年間平均RevPAR</div><div style={{fontSize:22,fontWeight:800,color:"#38bdf8",marginTop:4}}>{fmtYen(avgRevpar)}</div>
+        </div>
+        {roomTypes.map(rt=>(<div key={rt.id} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16}}>
+          <div style={{fontSize:12,color:"#94a3b8"}}>{rt.name}</div>
+          <div style={{fontSize:18,fontWeight:700,color:"#f8fafc",marginTop:4}}>{fmtYen(rtRevenue[rt.id])}</div>
+          <div style={{fontSize:11,color:"#64748b"}}>構成比:{annualRevenue>0?((rtRevenue[rt.id]/annualRevenue)*100).toFixed(1):0}%</div>
+        </div>))}
+      </div>
+
+      <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:20}}>
+        <h3 style={{margin:"0 0 12px",fontSize:15,fontWeight:600,color:"#f8fafc"}}>月別売上</h3>
+        <div style={{display:"flex",alignItems:"flex-end",gap:8,height:180}}>
+          {monthlyRevenue.map((rev,i)=>(<div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",height:"100%",justifyContent:"flex-end"}}>
+            <div style={{fontSize:9,color:"#94a3b8",marginBottom:4}}>{fmtYen(rev)}</div>
+            <div style={{width:"100%",background:"linear-gradient(180deg,#22c55e,#15803d)",borderRadius:"4px 4px 0 0",height:maxMonthly>0?(rev/maxMonthly)*140+"px":0,minHeight:2,transition:"height 0.3s"}}/>
+            <div style={{fontSize:11,color:"#94a3b8",marginTop:4}}>{i+1}月</div>
+          </div>))}
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:12,marginBottom:12,alignItems:"center"}}>
+        <button onClick={()=>setViewMode(viewMode==="monthly"?"daily":"monthly")} style={{background:"#334155",color:"#f8fafc",border:"none",borderRadius:6,padding:"6px 14px",fontSize:13,cursor:"pointer"}}>{viewMode==="monthly"?"日別詳細を表示":"月別に戻す"}</button>
+        {viewMode==="daily"&&<Fragment>
+          <select value={selectedMonth} onChange={e=>setSelectedMonth(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:6,padding:"4px 8px",fontSize:13}}>
+            {Array.from({length:12},(_,i)=><option key={i+1} value={i+1}>{i+1}月</option>)}
+          </select>
+          <button onClick={exportCSV} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:6,padding:"6px 14px",fontSize:12,cursor:"pointer"}}>📊 CSV出力</button>
+        </Fragment>}
+      </div>
+      {viewMode==="daily"&&(
+        <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,overflowX:"auto"}}>
+          <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+            <thead>
+              <tr style={{borderBottom:"1px solid #475569"}}>
+                <th rowSpan={2} style={{padding:"6px 8px",textAlign:"left",color:"#94a3b8",position:"sticky",left:0,background:"#1e293b",zIndex:2,borderRight:"1px solid #334155"}}>日付</th>
+                <th rowSpan={2} style={{padding:"6px 8px",textAlign:"left",color:"#94a3b8"}}>曜日</th>
+                {roomTypes.map(rt=>(<th key={rt.id} colSpan={3} style={{padding:"6px 8px",textAlign:"center",color:"#f8fafc",borderLeft:"1px solid #334155",fontWeight:600}}>{rt.name}</th>))}
+                <th colSpan={4} style={{padding:"6px 8px",textAlign:"center",color:"#22c55e",borderLeft:"2px solid #475569",fontWeight:700}}>全体</th>
+              </tr>
+              <tr style={{borderBottom:"1px solid #334155"}}>
+                {roomTypes.map(rt=>(<Fragment key={rt.id}>
+                  <th style={{padding:"4px 6px",textAlign:"right",color:"#94a3b8",borderLeft:"1px solid #334155",fontSize:10}}>売上</th>
+                  <th style={{padding:"4px 6px",textAlign:"right",color:"#fbbf24",fontSize:10}}>OCC</th>
+                  <th style={{padding:"4px 6px",textAlign:"right",color:"#a78bfa",fontSize:10}}>ADR</th>
+                </Fragment>))}
+                <th style={{padding:"4px 6px",textAlign:"right",color:"#94a3b8",borderLeft:"2px solid #475569",fontSize:10}}>売上</th>
+                <th style={{padding:"4px 6px",textAlign:"right",color:"#fbbf24",fontSize:10}}>OCC</th>
+                <th style={{padding:"4px 6px",textAlign:"right",color:"#a78bfa",fontSize:10}}>ADR</th>
+                <th style={{padding:"4px 6px",textAlign:"right",color:"#38bdf8",fontSize:10}}>RevPAR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.filter(d=>d.month===selectedMonth).map(day=>{
+                const rev=dailyRevenue[day.index];const rp=rev.totalRoomsAll>0?rev.total/rev.totalRoomsAll:0;
+                const rb=day.isHoliday||day.isSun?"#1a1a2e":day.isSat?"#1a2a1a":"transparent";
+                const sb=day.isHoliday||day.isSun?"#1a1a2e":day.isSat?"#1a2a1a":"#1e293b";
+                return(<tr key={day.index} style={{borderBottom:"1px solid #1e293b",background:rb}}>
+                  <td style={{padding:"3px 6px",color:"#f8fafc",position:"sticky",left:0,background:sb,zIndex:1,borderRight:"1px solid #334155",whiteSpace:"nowrap"}}>{day.label}</td>
+                  <td style={{padding:"3px 6px",color:day.isSun||day.isHoliday?"#f87171":day.isSat?"#60a5fa":"#94a3b8",whiteSpace:"nowrap"}}>{day.dowLabel}{day.isHoliday?" 祝":""}</td>
+                  {roomTypes.map(rt=>{const d=rev.details[rt.id];return(<Fragment key={rt.id}>
+                    <td style={{padding:"3px 6px",textAlign:"right",color:"#e2e8f0",borderLeft:"1px solid #334155"}}>{fmtYen(d?.revenue||0)}</td>
+                    <td style={{padding:"3px 6px",textAlign:"right",color:"#fbbf24"}}>{(d?.occ||0).toFixed(0)}%</td>
+                    <td style={{padding:"3px 6px",textAlign:"right",color:"#a78bfa"}}>{fmtYen(d?.price||0)}</td>
+                  </Fragment>)})}
+                  <td style={{padding:"3px 6px",textAlign:"right",color:"#22c55e",fontWeight:700,borderLeft:"2px solid #475569"}}>{fmtYen(rev.total)}</td>
+                  <td style={{padding:"3px 6px",textAlign:"right",color:"#fbbf24",fontWeight:600}}>{rev.occAll.toFixed(1)}%</td>
+                  <td style={{padding:"3px 6px",textAlign:"right",color:"#a78bfa",fontWeight:600}}>{fmtYen(rev.adr)}</td>
+                  <td style={{padding:"3px 6px",textAlign:"right",color:"#38bdf8",fontWeight:600}}>{fmtYen(rp)}</td>
+                </tr>);
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══ PLAN-BASED OPTIMIZER ═══
+function PlanOptimizer({roomTypes,days,demandMap,plans,setPlans,demandLevels,scenarios,elasticity}){
+  const[results,setResults]=useState([]);
+  const[running,setRunning]=useState(false);
+  const[showTop,setShowTop]=useState(20);
+
+  const addPlan=()=>{
+    const ts=Date.now();
+    setPlans(p=>[...p,{
+      id:"plan_"+ts,name:"新規プラン",roomsPerFloor:10,floors:8,
+      types:[{id:"t1_"+ts,name:"シングル",area:14.47},{id:"t2_"+ts,name:"ツイン",area:31.36}],
+      scenarioNames:[],useDemandFrom:null
+    }]);
+  };
+
+  // Auto-generate plans from saved scenarios
+  const generateFromScenarios=()=>{
+    if(!scenarios||scenarios.length===0){alert("シナリオが保存されていません");return}
+    const ts=Date.now();
+    // 1シナリオ＝1プラン（グループ化しない）。各シナリオを個別カードにして個別削除できるように。
+    const newPlans=scenarios.map((sc,idx)=>{
+      const usedArea=sc.roomTypes.reduce((s,rt)=>s+rt.rooms*rt.area,0);
+      return{
+        id:"auto_"+ts+"_"+idx,
+        name:sc.name+" の最適化",
+        roomsPerFloor:10,floors:8,
+        types:sc.roomTypes.map((rt,i)=>({id:"at_"+ts+"_"+idx+"_"+i,name:rt.name,area:rt.area})),
+        scenarioNames:[sc.name],
+        useDemandFrom:sc,
+        maxArea:usedArea
+      };
+    });
+    setPlans(newPlans);
+  };
+
+  const updatePlan=(idx,f,v)=>setPlans(p=>p.map((pl,i)=>i===idx?{...pl,[f]:v}:pl));
+  const removePlan=idx=>{setPlans(p=>p.filter((_,i)=>i!==idx));setResults(r=>r.filter((_,i)=>i!==idx))};
+  const addPlanType=(pIdx)=>{
+    setPlans(p=>p.map((pl,i)=>i===pIdx?{...pl,types:[...pl.types,{id:"t_"+Date.now(),name:"新規タイプ",area:20}]}:pl));
+  };
+  const updatePlanType=(pIdx,tIdx,f,v)=>{
+    setPlans(p=>p.map((pl,i)=>i===pIdx?{...pl,types:pl.types.map((t,j)=>j===tIdx?{...t,[f]:v}:t)}:pl));
+  };
+  const removePlanType=(pIdx,tIdx)=>{
+    setPlans(p=>p.map((pl,i)=>i===pIdx?{...pl,types:pl.types.filter((_,j)=>j!==tIdx)}:pl));
+  };
+
+  const findMasterRT=(planTypeName,srcRoomTypes)=>{
+    const rts=srcRoomTypes||roomTypes;
+    return rts.find(rt=>planTypeName.includes(rt.name)||rt.name.includes(planTypeName))||rts[0];
+  };
+
+  const runAllPlans=()=>{
+    setRunning(true);
+    setTimeout(()=>{
+      const allResults=[];
+      plans.forEach(plan=>{
+        const smallestArea=Math.min(...plan.types.map(t=>t.area));
+        const totalFloorArea=plan.maxArea||plan.roomsPerFloor*smallestArea*plan.floors;
+        const srcDemandMap=plan.useDemandFrom?.demandMap||demandMap;
+        const srcRoomTypes=plan.useDemandFrom?.roomTypes||roomTypes;
+        const combos=[];
+        const types=plan.types;
+
+        function generate(idx,remaining,current){
+          if(idx===types.length-1){
+            const rooms=Math.floor(remaining/types[idx].area);
+            if(rooms>=0){
+              const combo=[...current,{...types[idx],rooms}];
+              const usedArea=combo.reduce((s,c)=>s+c.rooms*c.area,0);
+              if(usedArea<=totalFloorArea)combos.push(combo);
+            }
+            return;
+          }
+          const maxRooms=Math.floor(remaining/types[idx].area);
+          for(let r=0;r<=maxRooms;r++){
+            generate(idx+1,remaining-r*types[idx].area,[...current,{...types[idx],rooms:r}]);
+          }
+        }
+        if(types.length>0)generate(0,totalFloorArea,[]);
+
+        // Find saved scenarios that belong to this plan
+        const matchScenarios=(scenarios||[]).filter(sc=>plan.scenarioNames?.includes(sc.name));
+
+        const scored=combos.map(combo=>{
+          let totalRev=0;
+          days.forEach(day=>{
+            combo.forEach(c=>{
+              const mrt=findMasterRT(c.name,srcRoomTypes);if(!mrt)return;
+              const demand=srcDemandMap[day.index]?.[mrt.id]??2;if(demand===0)return;
+              const price=mrt.prices[demand]||0;const occ=(mrt.occ[demand]||0)/100;
+              totalRev+=Math.round(c.rooms*occ*10)/10*price;
+            });
+          });
+          const totalRooms=combo.reduce((s,c)=>s+c.rooms,0);
+          const usedArea=combo.reduce((s,c)=>s+c.rooms*c.area,0);
+          let matchedScenario=null;
+          matchScenarios.forEach(sc=>{
+            const matches=combo.every(c=>{
+              const scRT=sc.roomTypes.find(rt=>c.name.includes(rt.name)||rt.name.includes(c.name));
+              return scRT&&scRT.rooms===c.rooms;
+            });
+            if(matches)matchedScenario=sc.name;
+          });
+          return{combo,revenue:totalRev,totalRooms,usedArea,planName:plan.name,planId:plan.id,matchedScenario};
+        });
+
+        scored.sort((a,b)=>b.revenue-a.revenue);
+        allResults.push({plan,scenarios:scored,totalExplored:combos.length});
+      });
+      setResults(allResults);
+      setRunning(false);
+    },200);
+  };
+
+  const IS={background:"#0f172a",color:"#f8fafc",border:"1px solid #475569",borderRadius:4,padding:"4px 6px",fontSize:13,width:70,textAlign:"right"};
+
+  const bestOverall=results.length>0?results.reduce((best,r)=>{
+    const top=r.scenarios[0];
+    return(!best||(top&&top.revenue>best.revenue))?{...top,planName:r.plan.name}:best;
+  },null):null;
+
+  return(
+    <div>
+      <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:16}}>
+        <h3 style={{margin:"0 0 8px",fontSize:15,fontWeight:600,color:"#f8fafc"}}>🏗️ プラン別ルームミックス最適化</h3>
+        <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:8,padding:12,marginBottom:12,fontSize:13,color:"#94a3b8",lineHeight:1.8}}>
+          <strong style={{color:"#f8fafc"}}>使い方:</strong><br/>
+          ① 「シナリオ比較」タブで複数パターンを保存（例：A1, A2, B1, B2）<br/>
+          ② <strong style={{color:"#22c55e"}}>「📋 保存シナリオから自動生成」</strong>を押すと、同じ部屋タイプのシナリオをグループ化してプランを自動作成<br/>
+          ③ 「最適化を実行」で全パターン自動探索 → 保存シナリオ間の最適構成を👑で表示。保存済みパターンには📌マーク
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={generateFromScenarios} disabled={!scenarios||scenarios.length===0}
+            style={{background:scenarios?.length>0?"#22c55e":"#334155",color:scenarios?.length>0?"#0f172a":"#64748b",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:700,cursor:scenarios?.length>0?"pointer":"default"}}>
+            📋 保存シナリオから自動生成（{scenarios?.length||0}件）
+          </button>
+          <button onClick={addPlan} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,cursor:"pointer"}}>＋ 手動でプラン追加</button>
+        </div>
+      </div>
+
+      {plans.map((plan,pIdx)=>{
+        const smallestArea=Math.min(...plan.types.map(t=>t.area));
+        const totalArea=plan.maxArea||plan.roomsPerFloor*smallestArea*plan.floors;
+        return(
+        <div key={plan.id} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:12}}>
+          <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
+            <input value={plan.name} onChange={e=>updatePlan(pIdx,"name",e.target.value)} style={{...IS,width:280,fontSize:15,fontWeight:700}}/>
+            <div style={{background:"#0f172a",borderRadius:6,padding:"6px 12px",border:"1px solid #334155"}}>
+              <div style={{fontSize:10,color:"#64748b"}}>探索面積上限</div>
+              <div style={{fontSize:14,fontWeight:700,color:"#38bdf8"}}>{totalArea.toFixed(1)}㎡</div>
+            </div>
+            {plan.scenarioNames?.length>0&&(
+              <div style={{background:"#14532d",borderRadius:6,padding:"6px 12px",border:"1px solid #166534"}}>
+                <div style={{fontSize:10,color:"#86efac"}}>元シナリオ</div>
+                <div style={{fontSize:11,color:"#f0fdf4"}}>{plan.scenarioNames.join(", ")}</div>
+              </div>
+            )}
+            <button onClick={()=>removePlan(pIdx)} style={{marginLeft:"auto",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"4px 10px",fontSize:12,cursor:"pointer"}}>削除</button>
+          </div>
+          <div style={{marginBottom:12}}>
+            <span style={{fontSize:13,color:"#94a3b8",fontWeight:600}}>部屋タイプ:</span>
+            {plan.types.map((t,tIdx)=>{
+              const srcRTs=plan.useDemandFrom?.roomTypes||roomTypes;
+              const matched=findMasterRT(t.name,srcRTs);
+              return(
+              <div key={t.id} style={{display:"flex",gap:8,alignItems:"center",marginTop:6,flexWrap:"wrap"}}>
+                <input value={t.name} onChange={e=>updatePlanType(pIdx,tIdx,"name",e.target.value)} style={{...IS,width:160,fontWeight:600}}/>
+                <span style={{fontSize:11,color:"#94a3b8"}}>面積:</span>
+                <input type="number" step="0.01" value={t.area} onChange={e=>updatePlanType(pIdx,tIdx,"area",+e.target.value)} style={{...IS,width:80}}/>
+                <span style={{fontSize:11,color:"#94a3b8"}}>㎡</span>
+                <span style={{fontSize:11,padding:"2px 8px",borderRadius:4,background:matched?"#14532d":"#7f1d1d",color:matched?"#86efac":"#fca5a5"}}>→「{matched?.name||"未マッチ"}」の単価・稼働率</span>
+                {plan.types.length>1&&<button onClick={()=>removePlanType(pIdx,tIdx)} style={{background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>✕</button>}
+              </div>);
+            })}
+            <button onClick={()=>addPlanType(pIdx)} style={{marginTop:8,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:4,padding:"4px 12px",fontSize:12,cursor:"pointer"}}>＋ タイプ追加</button>
+          </div>
+        </div>);
+      })}
+
+      {plans.length>0&&(
+        <div style={{marginTop:16,marginBottom:16,display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+          <button onClick={runAllPlans} disabled={running} style={{background:running?"#475569":"#22c55e",color:running?"#94a3b8":"#0f172a",border:"none",borderRadius:6,padding:"10px 24px",fontSize:14,fontWeight:700,cursor:running?"wait":"pointer"}}>
+            {running?"全パターン探索中...":"🔍 最適化を実行（全パターン自動探索）"}
+          </button>
+          <span style={{fontSize:12,color:"#64748b"}}>表示:
+            <select value={showTop} onChange={e=>setShowTop(+e.target.value)} style={{background:"#1e293b",color:"#f8fafc",border:"1px solid #475569",borderRadius:4,padding:"2px 6px",fontSize:12,marginLeft:4}}>
+              {[10,20,50,100].map(n=><option key={n} value={n}>TOP{n}</option>)}
+            </select>
+          </span>
+        </div>
+      )}
+
+      {bestOverall&&(
+        <div style={{background:"linear-gradient(135deg,#052e16,#14532d)",border:"2px solid #22c55e",borderRadius:10,padding:16,marginBottom:16}}>
+          <h3 style={{margin:"0 0 8px",fontSize:16,fontWeight:700,color:"#fbbf24"}}>👑 全プラン横断 最適解</h3>
+          <div style={{fontSize:15,color:"#f0fdf4"}}><strong>{bestOverall.planName}</strong> — {bestOverall.combo.map(c=>c.name+": "+c.rooms+"室").join(" / ")}</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#22c55e",marginTop:4}}>年間売上: {fmtYen(bestOverall.revenue)}</div>
+          <div style={{fontSize:12,color:"#86efac"}}>総室数: {bestOverall.totalRooms}室 / 使用面積: {bestOverall.usedArea.toFixed(1)}㎡</div>
+        </div>
+      )}
+
+      {results.map((r,rIdx)=>{
+        const top=r.scenarios.slice(0,showTop);
+        const best=r.scenarios[0];
+        const worst=r.scenarios[r.scenarios.length-1];
+        return(
+        <div key={r.plan.id} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:12}}>
+            <h3 style={{margin:0,fontSize:15,fontWeight:600,color:"#f8fafc"}}>{r.plan.name}</h3>
+            <div style={{display:"flex",gap:12,fontSize:12}}>
+              <span style={{color:"#64748b"}}>探索パターン数: <strong style={{color:"#38bdf8"}}>{fmt(r.totalExplored)}</strong></span>
+              {best&&worst&&<span style={{color:"#64748b"}}>売上レンジ: {fmtYen(worst.revenue)} 〜 <strong style={{color:"#22c55e"}}>{fmtYen(best.revenue)}</strong></span>}
+            </div>
+          </div>
+          {best&&(
+            <div style={{background:"#052e16",border:"1px solid #166534",borderRadius:8,padding:12,marginBottom:12}}>
+              <span style={{fontSize:13,color:"#fbbf24",fontWeight:700}}>👑 最適構成: </span>
+              <span style={{fontSize:14,color:"#f0fdf4",fontWeight:600}}>{best.combo.map(c=>c.name+" "+c.rooms+"室").join(" / ")}</span>
+              <span style={{fontSize:16,fontWeight:800,color:"#22c55e",marginLeft:12}}>{fmtYen(best.revenue)}</span>
+              <span style={{fontSize:12,color:"#86efac",marginLeft:8}}>（{best.totalRooms}室 / {best.usedArea.toFixed(1)}㎡）</span>
+            </div>
+          )}
+          <div style={{overflowX:"auto"}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:12}}>
+              <thead><tr style={{borderBottom:"1px solid #334155"}}>
+                <th style={{padding:"8px",textAlign:"center",color:"#94a3b8"}}>順位</th>
+                {r.plan.types.map(t=><th key={t.id} style={{padding:"8px",textAlign:"center",color:"#94a3b8"}}>{t.name}</th>)}
+                <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>総室数</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>使用面積</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>年間売上</th>
+                {best&&<th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>最適比</th>}
+                <th style={{padding:"8px",textAlign:"center",color:"#94a3b8"}}>メモ</th>
+              </tr></thead>
+              <tbody>
+                {top.map((sc,i)=>{
+                  const diffPct=best?((sc.revenue-best.revenue)/best.revenue*100):0;
+                  const isScenario=!!sc.matchedScenario;
+                  return(
+                  <tr key={i} style={{borderBottom:"1px solid #1e293b",background:i===0?"#052e16":isScenario?"#1a1a2e":"transparent"}}>
+                    <td style={{padding:"6px 8px",textAlign:"center",color:i===0?"#fbbf24":"#f8fafc",fontWeight:i===0?800:400}}>{i===0?"👑":i+1}</td>
+                    {r.plan.types.map(t=>{const c=sc.combo.find(c=>c.id===t.id);return<td key={t.id} style={{padding:"6px 8px",textAlign:"center",color:"#e2e8f0",fontWeight:i===0||isScenario?700:400}}>{c?.rooms||0}室</td>})}
+                    <td style={{padding:"6px 8px",textAlign:"right",color:"#e2e8f0"}}>{sc.totalRooms}室</td>
+                    <td style={{padding:"6px 8px",textAlign:"right",color:"#94a3b8"}}>{sc.usedArea.toFixed(1)}㎡</td>
+                    <td style={{padding:"6px 8px",textAlign:"right",color:"#22c55e",fontWeight:700}}>{fmtYen(sc.revenue)}</td>
+                    {best&&<td style={{padding:"6px 8px",textAlign:"right",color:diffPct===0?"#22c55e":"#f87171",fontSize:11}}>{diffPct===0?"—":diffPct.toFixed(1)+"%"}</td>}
+                    <td style={{padding:"6px 8px",textAlign:"center",fontSize:11,color:isScenario?"#a78bfa":"#475569"}}>{isScenario?"📌 "+sc.matchedScenario:""}</td>
+                  </tr>);
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>);
+      })}
+    </div>
+  );
+}
+
+// ═══ SCENARIO COMPARE ═══
+function ScenarioCompare({scenarios,setScenarios,saveScenario,loadScenario,calcDailyRevenue,days,annualRevenue,roomTypes}){
+  const[newName,setNewName]=useState("");
+  const IS={background:"#0f172a",color:"#f8fafc",border:"1px solid #475569",borderRadius:4,padding:"4px 6px",fontSize:13,width:200};
+
+  const doSave=()=>{if(newName.trim()){saveScenario(newName.trim());setNewName("")}};
+  const deleteScenario=(idx)=>setScenarios(p=>p.filter((_,i)=>i!==idx));
+  const renameScenario=(idx,newName)=>setScenarios(p=>p.map((sc,i)=>i===idx?{...sc,name:newName}:sc));
+
+  // Recalculate revenue for each scenario
+  const enriched=scenarios.map(sc=>{
+    const dr=calcDailyRevenue(sc.roomTypes,sc.demandMap);
+    const rev=dr.reduce((s,d)=>s+d.total,0);
+    const totalSold=dr.reduce((s,d)=>s+d.soldRoomsAll,0);
+    const totalAvail=dr.reduce((s,d)=>s+d.totalRoomsAll,0);
+    const occ=totalAvail>0?(totalSold/totalAvail)*100:0;
+    const adr=totalSold>0?rev/totalSold:0;
+    const revpar=totalAvail>0?rev/totalAvail:0;
+    const totalRooms=sc.roomTypes.reduce((s,rt)=>s+rt.rooms,0);
+    return{...sc,revenue:rev,occ,adr,revpar,totalRooms};
+  });
+
+  const maxRev=Math.max(...enriched.map(e=>e.revenue),1);
+
+  return(
+    <div>
+      <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:16}}>
+        <h3 style={{margin:"0 0 12px",fontSize:15,fontWeight:600,color:"#f8fafc"}}>📊 シナリオ比較</h3>
+        <p style={{fontSize:13,color:"#94a3b8",margin:"0 0 12px"}}>
+          現在の設定（マスター・需要カレンダー）をシナリオとして名前を付けて保存し、複数パターンを並べて比較できます。
+        </p>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="シナリオ名を入力..." style={IS} onKeyDown={e=>{if(e.key==="Enter")doSave()}}/>
+          <button onClick={doSave} disabled={!newName.trim()} style={{background:newName.trim()?"#22c55e":"#334155",color:newName.trim()?"#0f172a":"#64748b",border:"none",borderRadius:6,padding:"6px 16px",fontSize:13,fontWeight:700,cursor:newName.trim()?"pointer":"default"}}>
+            💾 現在の設定を保存
+          </button>
+        </div>
+        <div style={{fontSize:12,color:"#64748b",marginTop:6}}>
+          現在の売上: <strong style={{color:"#22c55e"}}>{fmtYen(annualRevenue)}</strong> / 室数: {roomTypes.reduce((s,rt)=>s+rt.rooms,0)}室 / タイプ: {roomTypes.map(rt=>rt.name).join(", ")}
+        </div>
+      </div>
+
+      {enriched.length===0?(
+        <div style={{textAlign:"center",padding:40,color:"#64748b"}}>
+          <p style={{fontSize:16}}>まだシナリオが保存されていません</p>
+          <p style={{fontSize:13}}>上のフォームから現在の設定を保存してください。複数パターンを保存すると比較できます。</p>
+        </div>
+      ):(
+        <div>
+          {/* Comparison bar chart */}
+          <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,marginBottom:16}}>
+            <h4 style={{margin:"0 0 12px",fontSize:14,color:"#f8fafc"}}>年間売上比較</h4>
+            {enriched.map((sc,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:12,marginBottom:8}}>
+                <span style={{fontSize:12,color:"#94a3b8",minWidth:120,textAlign:"right"}}>{sc.name}</span>
+                <div style={{flex:1,background:"#0f172a",borderRadius:4,height:28,overflow:"hidden"}}>
+                  <div style={{background:"linear-gradient(90deg,#22c55e,#15803d)",height:"100%",width:(sc.revenue/maxRev*100)+"%",borderRadius:4,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:8,transition:"width 0.5s"}}>
+                    <span style={{fontSize:11,color:"#fff",fontWeight:700}}>{fmtYen(sc.revenue)}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Comparison table */}
+          <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:16,overflowX:"auto"}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:12}}>
+              <thead><tr style={{borderBottom:"1px solid #334155"}}>
+                <th style={{padding:"8px",textAlign:"left",color:"#94a3b8"}}>シナリオ</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>年間売上</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#fbbf24"}}>OCC</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#a78bfa"}}>ADR</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#38bdf8"}}>RevPAR</th>
+                <th style={{padding:"8px",textAlign:"right",color:"#94a3b8"}}>総室数</th>
+                <th style={{padding:"8px",textAlign:"left",color:"#94a3b8"}}>構成</th>
+                <th style={{padding:"8px",textAlign:"center",color:"#94a3b8"}}></th>
+              </tr></thead>
+              <tbody>
+                {enriched.map((sc,i)=>{
+                  const best=enriched.reduce((a,b)=>a.revenue>b.revenue?a:b);
+                  const isBest=sc.revenue===best.revenue;
+                  return(
+                    <tr key={i} style={{borderBottom:"1px solid #1e293b",background:isBest?"#052e16":"transparent"}}>
+                      <td style={{padding:"6px 8px",color:isBest?"#fbbf24":"#f8fafc",fontWeight:isBest?700:400}}>{isBest?"👑 ":""}<input value={sc.name} onChange={e=>renameScenario(i,e.target.value)} style={{background:"transparent",border:"1px solid transparent",borderRadius:4,color:"inherit",fontWeight:"inherit",fontSize:12,width:120,padding:"2px 4px"}} onFocus={e=>{e.target.style.borderColor="#475569";e.target.style.background="#0f172a"}} onBlur={e=>{e.target.style.borderColor="transparent";e.target.style.background="transparent"}}/></td>
+                      <td style={{padding:"6px 8px",textAlign:"right",color:"#22c55e",fontWeight:700}}>{fmtYen(sc.revenue)}</td>
+                      <td style={{padding:"6px 8px",textAlign:"right",color:"#fbbf24"}}>{sc.occ.toFixed(1)}%</td>
+                      <td style={{padding:"6px 8px",textAlign:"right",color:"#a78bfa"}}>{fmtYen(sc.adr)}</td>
+                      <td style={{padding:"6px 8px",textAlign:"right",color:"#38bdf8"}}>{fmtYen(sc.revpar)}</td>
+                      <td style={{padding:"6px 8px",textAlign:"right",color:"#e2e8f0"}}>{sc.totalRooms}室</td>
+                      <td style={{padding:"6px 8px",color:"#94a3b8",fontSize:11}}>{sc.roomTypes.map(rt=>rt.name+":"+rt.rooms+"室").join(" / ")}</td>
+                      <td style={{padding:"6px 8px",textAlign:"center"}}>
+                        <button onClick={()=>loadScenario(sc)} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:4,padding:"3px 8px",fontSize:11,cursor:"pointer",marginRight:4}}>読込</button>
+                        <button onClick={()=>deleteScenario(i)} style={{background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:4,padding:"3px 8px",fontSize:11,cursor:"pointer"}}>削除</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
