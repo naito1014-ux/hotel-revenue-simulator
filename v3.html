@@ -25,7 +25,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const{useState,useMemo,useCallback,useEffect,Fragment}=React;
+const{useState,useMemo,useCallback,useEffect,useRef,Fragment}=React;
 
 const isLeapYear=y=>(y%4===0&&y%100!==0)||y%400===0;
 const daysInYear=y=>isLeapYear(y)?366:365;
@@ -102,7 +102,11 @@ function App(){
 
   const days=useMemo(()=>generateDays(year),[year]);
 
-  useEffect(()=>{setDemandMap(initDemand(year,roomTypes,demandLevels))},[year]);
+  const skipInitRef=useRef(false);
+  useEffect(()=>{
+    if(skipInitRef.current){skipInitRef.current=false;return;}
+    setDemandMap(initDemand(year,roomTypes,demandLevels));
+  },[year]);
 
   const setDemand=useCallback((di,ri,v)=>{setDemandMap(p=>({...p,[di]:{...(p[di]||{}),[ri]:v}}))},[]);
   const setMonthDemand=useCallback((month,ri,v)=>{
@@ -153,6 +157,7 @@ function App(){
   const importAll=(e)=>{
     const file=e.target.files[0];if(!file)return;const r=new FileReader();
     r.onload=(ev)=>{try{const d=JSON.parse(ev.target.result);
+      if(d.year&&d.year!==year)skipInitRef.current=true;
       if(d.year)setYear(d.year);if(d.roomTypes)setRoomTypes(d.roomTypes);if(d.demandMap)setDemandMap(d.demandMap);
       if(d.totalArea)setTotalArea(d.totalArea);if(d.demandLevels)setDemandLevels(d.demandLevels);
       if(d.scenarios)setScenarios(d.scenarios);if(d.plans)setPlans(d.plans);alert("読み込み完了")}catch{alert("読み込み失敗")}};
